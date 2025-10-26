@@ -4,6 +4,9 @@ import os
 from dotenv import load_dotenv
 import time
 import json
+import pandas as pd
+import altair as alt 
+
 
 # Carica le variabili d'ambiente dal file .env
 load_dotenv()
@@ -24,80 +27,11 @@ else:
     st.stop()
 
 
-def carica_vincoli_culturali(paese):
-    """Carica le linee guida culturali da un file JSON."""
-    if not paese or paese == "Nessuna selezione specifica":
-        return None
-    filename = f"cultural_guidelines/{paese.lower().replace(' ', '_')}.json"
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return json.dumps(data, indent=2, ensure_ascii=False)
-    except FileNotFoundError:
-        st.warning(f"File di linee guida per '{paese}' non trovato.")
-        return None
-    except Exception as e:
-        st.error(f"Errore nel caricamento del file JSON per '{paese}': {e}")
-        return None
-
-def visualizza_risultati_strutturati(risultati):
-    """
-    Funzione per visualizzare l'output JSON in modo formattato su Streamlit.
-    """
-    try:
-        data = json.loads(risultati)
-
-        # 1. Mostra il verdetto complessivo
-        verdetto = data.get("verdetto_complessivo", "NON_DEFINITO")
-        motivazione_verdetto = data.get("motivazione_verdetto", "Nessuna motivazione fornita.")
-
-        st.markdown("---")
-        st.subheader("Verdetto Complessivo")
-
-        if verdetto == "CONSIGLIATO":
-            st.success(f"✅ **Consigliato:** {motivazione_verdetto}")
-        elif verdetto == "CONSIGLIATO_CON_RISERVA":
-            st.warning(f"⚠️ **Consigliato con Riserva:** {motivazione_verdetto}")
-        elif verdetto == "NON_CONSIGLIATO":
-            st.error(f"❌ **Non Consigliato:** {motivazione_verdetto}")
-        else:
-            st.info(f"ℹ️ **Verdetto non definito:** {motivazione_verdetto}")
-
-        # 2. Mostra la checklist di analisi
-        st.markdown("---")
-        st.subheader("Checklist di Analisi Dettagliata")
-
-        checklist = data.get("checklist_analisi", [])
-        if not checklist:
-            st.write("Nessun dettaglio fornito nella checklist.")
-            return
-
-        for item in checklist:
-            categoria = item.get("categoria", "Senza Categoria")
-            status = item.get("status", "INFO")
-            punto_analizzato = item.get("punto_analizzato", "N/A")
-            motivazione_item = item.get("motivazione", "N/A")
-
-            with st.expander(f"{categoria}: {punto_analizzato}", expanded=status != "OK"):
-                if status == "OK":
-                    st.markdown(f"**Status:** <span style='color:green;'>✅ OK</span>", unsafe_allow_html=True)
-                elif status == "ATTENZIONE":
-                    st.markdown(f"**Status:** <span style='color:orange;'>⚠️ ATTENZIONE</span>", unsafe_allow_html=True)
-                elif status == "CRITICO":
-                    st.markdown(f"**Status:** <span style='color:red;'>❌ CRITICO</span>", unsafe_allow_html=True)
-                
-                st.markdown(f"**Motivazione:** {motivazione_item}")
-
-    except json.JSONDecodeError:
-        st.error("Errore: L'output del modello non è un JSON valido. Visualizzazione del testo grezzo:")
-        st.code(risultati)
-    except Exception as e:
-        st.error(f"Si è verificato un errore durante la visualizzazione dei risultati: {e}")
-        st.code(risultati)
-
-
 def main():
-    """Funzione principale per l'applicazione Ad-Visor."""
+    """
+    Funzione principale per l'applicazione Ad-Visor.
+    """
+    # --- Sidebar ---
     with st.sidebar:
         st.title("Ad-Visor")
         st.markdown("---")
@@ -105,9 +39,11 @@ def main():
             "Seleziona uno strumento:",
             ("Video Checker", "Report Hub (Disabilitato)")
         )
+
         st.markdown("---")
         st.info("Ad-Visor è il tuo assistente AI per l'analisi pre-lancio di contenuti video pubblicitari.")
 
+    # --- Pagina Principale ---
     st.title("📹 Ad-Visor: Analisi Video con AI")
 
     if scelta_tool == "Video Checker":
@@ -116,117 +52,262 @@ def main():
         tool_disabilitato()
 
 def video_checker_tool():
-    """Funzione per lo strumento di analisi video."""
+    """
+    Funzione per lo strumento di analisi video.
+    """
     st.header("🔍 Video Checker")
     st.write("Carica un video per analizzare aspetti culturali, DE&I e potenziali problematiche di comunicazione.")
 
     video_caricato = st.file_uploader("Scegli un file video", type=["mp4", "mov", "avi", "mkv"])
 
-    st.markdown("---")
-    st.subheader("Impostazioni di Analisi Avanzata (Opzionale)")
-
-    paesi_disponibili = ["Nessuna selezione specifica", "Italia", "Giappone", "Cina", "Stati Uniti", "Arabia Saudita"]
-    paese_selezionato = st.selectbox(
-        "Seleziona un mercato di riferimento per un'analisi culturale mirata:", 
-        paesi_disponibili
-    )
-
-    controlli_personalizzati = st.text_area(
-        "Aggiungi controlli personalizzati (uno per riga):", 
-        placeholder="Esempio: Non deve contenere simboli cristiani.\nEsempio: Verificare che il logo sia sempre visibile."
-    )
-
-    st.markdown("---")
 
     if video_caricato is not None:
+        temp_path = os.path.join("analytics", video_caricato.name)
+        with open(temp_path, "wb") as f:
+            f.write(video_caricato.getbuffer())
+        st.session_state.video_path = temp_path
         st.video(video_caricato)
-
+        
         if st.button("Analizza il Video"):
             with st.spinner("Analisi in corso... Questo processo potrebbe richiedere alcuni minuti."):
                 try:
+                    # Salva temporaneamente il file
                     with open(video_caricato.name, "wb") as f:
                         f.write(video_caricato.getbuffer())
 
-                    video_file = genai.upload_file(path=video_caricato.name, display_name="video_da_analizzare")
+                    # Carica il video sull'API di Gemini
+                    video_file = genai.upload_file(
+                        path=video_caricato.name,
+                        display_name="video_da_analizzare"
+                    )
+
+                    # Attendi che il file venga processato
                     while video_file.state.name == "PROCESSING":
                         st.write("In attesa che il video venga processato dal sistema...")
                         time.sleep(5)
                         video_file = genai.get_file(video_file.name)
-                    
+
                     if video_file.state.name == "FAILED":
                         st.error(f"Elaborazione del video fallita: {video_file.state}")
                         st.stop()
 
-                    # --- NUOVO PROMPT PER OUTPUT STRUTTURATO (JSON) ---
-                    prompt_template = f"""
+                    # Prompt per l'analisi
+                    prompt = """
                     Sei "Ad-Visor", un consulente esperto di marketing e comunicazione globale.
-                    Analizza attentamente il video fornito.
-                    La tua risposta DEVE essere unicamente un blocco di codice JSON valido, senza testo o markdown prima o dopo.
+                    Analizza attentamente questo video pubblicitario e fornisci un report dettagliato basato sui seguenti punti:
 
-                    Il JSON deve avere la seguente struttura:
-                    {{
-                      "verdetto_complessivo": "...",
-                      "motivazione_verdetto": "...",
-                      "checklist_analisi": [
-                        {{
-                          "categoria": "...",
-                          "punto_analizzato": "...",
-                          "status": "...",
-                          "motivazione": "..."
-                        }}
-                      ]
-                    }}
+                    1.  **Analisi Culturale:** Identifica elementi culturali e valuta la loro potenziale risonanza in diversi mercati internazionali.
 
-                    SPIEGAZIONE DEI CAMPI:
-                    - "verdetto_complessivo": Deve essere una di queste tre stringhe: "CONSIGLIATO", "CONSIGLIATO_CON_RISERVA", "NON_CONSIGLIATO".
-                    - "motivazione_verdetto": Una frase che riassume il perché del verdetto complessivo.
-                    - "checklist_analisi": Una lista di oggetti, ognuno rappresentante un punto di analisi.
-                      - "categoria": L'area di analisi (es. "Analisi Culturale", "DE&I", "Rilevamento Rischi", "Controlli Personalizzati").
-                      - "punto_analizzato": Lo specifico aspetto esaminato (es. "Uso di simboli religiosi", "Rappresentazione di genere").
-                      - "status": Deve essere una di queste tre stringhe: "OK", "ATTENZIONE", "CRITICO".
-                      - "motivazione": Spiegazione dettagliata del perché è stato assegnato quello status.
+                    2.  **Valutazione DE&I (Diversity, Equity & Inclusion):**
+                        *   **Rappresentazione:** Autenticità vs stereotipi.
+                        *   **Inclusività:** Messaggi inclusivi e rischi di esclusione.
 
-                    ISTRUZIONI PER L'ANALISI:
-                    1.  **Analisi Generale:** Valuta aspetti culturali, DE&I e rischi generali. Per ciascuno, crea una voce nella checklist.
-                    2.  **Analisi Specifica per Paese (se richiesta):** Se sono fornite le linee guida per un paese, usale per creare voci specifiche nella checklist nella categoria "Analisi Culturale - {paese_selezionato}".
-                    3.  **Controlli Personalizzati (se richiesti):** Per ogni controllo personalizzato fornito, crea una voce nella checklist nella categoria "Controlli Personalizzati".
+                    3.  **Rilevamento di Rischi e Controversie:**
+                        *   **Contenuti Sensibili:** Violenza, linguaggio inappropriato, temi controversi.
+                        *   **Messaggi Ambigui:** Possibili interpretazioni negative.
 
-                    ---
-                    INFORMAZIONI PER L'ANALISI CORRENTE:
-                    - Paese di Riferimento: {paese_selezionato}
-                    - Linee Guida Specifiche: {carica_vincoli_culturali(paese_selezionato) or "Nessuna"}
-                    - Controlli Personalizzati dall'Utente: {controlli_personalizzati or "Nessuno"}
-                    ---
+                    4.  **Consigli Strategici:** Suggerimenti chiari e attuabili per migliorare l'efficacia globale e ridurre i rischi.
 
-                    Ora analizza il video e fornisci l'output JSON.
+                    Fornisci una risposta ben strutturata con titoli chiari per ogni sezione.
                     """
 
                     model = genai.GenerativeModel(model_name="gemini-flash-latest")
-                    response = model.generate_content(
-                        [prompt_template, video_file], 
-                        request_options={'timeout': 600}
-                    )
-                    
-                    # Rimuove eventuali ```json ... ``` dal testo della risposta
-                    clean_response_text = response.text.strip().replace("```json", "").replace("```", "")
+                    response = model.generate_content([prompt, video_file], request_options={'timeout': 600})
 
                     st.success("Analisi completata!")
+                    st.markdown("---")
                     st.subheader("Risultati dell'Analisi di Ad-Visor")
-                    
-                    # Usa la nuova funzione per visualizzare i risultati
-                    visualizza_risultati_strutturati(clean_response_text)
+                    st.markdown(response.text)
 
-                    genai.delete_file(video_file.name)
+                    # Pulisci i file temporanei
+                    # genai.delete_file(video_file.name)
                     os.remove(video_caricato.name)
+                    
+
 
                 except Exception as e:
                     st.error(f"Si è verificato un errore durante l'analisi: {e}")
 
+    
+        if "analytics_current" not in st.session_state:
+            st.session_state.analytics_current = None
+        if "analytics_old" not in st.session_state:
+            st.session_state.analytics_old = None
+
+        # STEP 1 – Import current analytics
+        if st.button("Importa analytics del video"):
+            try:
+                with open("analytics/analytics1.json", "r") as f:
+                    analytics_json = json.load(f)
+                    st.session_state.analytics1 = analytics_json
+                df = pd.DataFrame(analytics_json["data"])
+                df["date"] = pd.to_datetime(df["date"])
+                df["version"] = "Current"
+                st.session_state.analytics_current = df
+                st.success("✅ Dati correnti importati con successo!")
+            except Exception as e:
+                st.error(f"Errore nel caricamento dei dati correnti: {e}")
+
+        # STEP 2 – Import old analytics (solo dopo aver importato i correnti)
+        if st.session_state.analytics_current is not None:
+            if st.button("Importa analytics versioni precedenti"):
+                try:
+                    with open("analytics/analytics2.json", "r") as f:
+                        analytics_json = json.load(f)
+                        st.session_state.analytics2 = analytics_json
+
+                    df_old = pd.DataFrame(analytics_json["data"])
+                    df_old["date"] = pd.to_datetime(df_old["date"])
+                    df_old["version"] = "Old"
+                    st.session_state.analytics_old = df_old
+                    st.success("📉 Dati vecchi importati con successo!")
+                except Exception as e:
+                    st.error(f"Errore nel caricamento dei dati vecchi: {e}")
+
+        # STEP 3 – Mostra un grafico separato per ogni KPI
+        if st.session_state.analytics_current is not None:
+
+            combined_df = st.session_state.analytics_current.copy()
+            if st.session_state.analytics_old is not None:
+                combined_df = pd.concat([combined_df, st.session_state.analytics_old])
+
+            kpi_columns = ["ROAS", "CPA", "CTR", "CVR", "CPL", "CPC"]
+
+            for kpi in kpi_columns:
+                if kpi in combined_df.columns:
+                    st.markdown(f"### {kpi}")
+
+                    chart = (
+                        alt.Chart(combined_df)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X("date:T", title="Data"),
+                            y=alt.Y(f"{kpi}:Q", title=f"Valore {kpi}"),
+                            color=alt.Color("version:N", legend=alt.Legend(title="Versione")),
+                            tooltip=["date:T", f"{kpi}:Q", "version:N"]
+                        )
+                        .properties(width=750, height=300)
+                    )
+
+                    st.altair_chart(chart, use_container_width=True)
+
+            if st.button("Analizza confronto tra video"):
+                if "video_path" not in st.session_state or not os.path.exists(st.session_state.video_path):
+                    st.error("⚠️ Carica prima un video da analizzare.")
+                    return
+
+                if not os.path.exists("analytics/mock.mp4"):
+                    st.error("⚠️ Il file analytics/mock.mp4 non esiste.")
+                    return
+
+                with st.spinner("Analisi comparativa in corso..."):
+                    try:
+                        # Carica entrambi i video su Gemini
+                        video_1 = genai.upload_file(path=st.session_state.video_path, display_name="video_corrente")
+                        video_2 = genai.upload_file(path="analytics/mock.mp4", display_name="video_mock")
+
+                        # Funzione di utilità: attende che un file diventi ACTIVE
+                        def wait_until_active(file_obj):
+                            while file_obj.state.name == "PROCESSING":
+                                st.write(f"⏳ Attendo che {file_obj.display_name} sia pronta...")
+                                time.sleep(3)
+                                file_obj = genai.get_file(file_obj.name)
+                            if file_obj.state.name != "ACTIVE":
+                                raise Exception(f"Il file {file_obj.display_name} non è attivo: {file_obj.state.name}")
+                            return file_obj
+
+                        video_1 = wait_until_active(video_1)
+                        video_2 = wait_until_active(video_2)
+
+                        model = genai.GenerativeModel(model_name="gemini-flash-latest")
+
+                        # Primo riepilogo: video corrente
+                        prompt_summary_v1 = """
+                        Sei "Ad-Visor", un consulente senior di marketing e comunicazione.
+                        Forni un riassunto dettagliato e strutturato del seguente video pubblicitario, concentrandoti su:
+                        1) Tono e ritmo
+                        2) Messaggio principale e call-to-action
+                        3) Elementi visivi rilevanti (ambientazione, abbigliamento, simboli)
+                        4) Rappresentazione e inclusività
+                        5) Eventuali elementi potenzialmente rischiosi o controversi
+                        6) Un breve paragrafo conclusivo con punti di forza e debolezze
+                        Rispondi in formato chiaro con titoli di sezione.
+                        """
+                        resp_v1 = model.generate_content([prompt_summary_v1, video_1], request_options={'timeout': 600})
+                        summary_v1 = resp_v1.text.strip()
+                        # st.markdown("### Riassunto Video Corrente")
+                        # st.markdown(summary_v1)
+
+                        # Secondo riepilogo: video mock
+                        prompt_summary_v2 = """
+                        Sei "Ad-Visor", un consulente senior di marketing e comunicazione.
+                        Forni un riassunto dettagliato e strutturato del seguente video pubblicitario (versione mock), concentrandoti su:
+                        1) Tono e ritmo
+                        2) Messaggio principale e call-to-action
+                        3) Elementi visivi rilevanti (ambientazione, abbigliamento, simboli)
+                        4) Rappresentazione e inclusività
+                        5) Eventuali elementi potenzialmente rischiosi o controversi
+                        6) Un breve paragrafo conclusivo con punti di forza e debolezze
+                        Rispondi in formato chiaro con titoli di sezione.
+                        """
+                        resp_v2 = model.generate_content([prompt_summary_v2, video_2], request_options={'timeout': 600})
+                        summary_v2 = resp_v2.text.strip()
+                        # st.markdown("### Riassunto Video Mock")
+                        # st.markdown(summary_v2)
+
+                        # Terza chiamata: check sulle differenze, prende i due riassunti testuali
+                        prompt_diff = f"""
+                        Sei "Ad-Visor", consulente senior.
+                        Hai a disposizione due riassunti dettagliati di due video pubblicitari.
+
+                        Riassunto A (Video Corrente):
+                        {summary_v1}
+                        Con le analytics:
+                        {st.session_state.analytics1}
+
+                        Riassunto B (Video Mock):
+                        {summary_v2}
+                        Con le analytics:
+                        {st.session_state.analytics2}
+
+                        Sulla base dei riassunti e dei dati:
+
+                        Spiega in dettaglio perché uno dei due video ha performato meglio dell’altro, considerando:
+                        - Tono, ritmo e messaggio
+                        - Chiarezza della call-to-action
+                        - Elementi visivi e simbolici
+                        - Inclusività e rappresentazione
+                        - KPI (ROAS, CPA, CTR, CVR, CPL, CPC)
+                        
+                        Crea una tabella comparativa, in alto le raccomandazioni basandosi sulle differenze
+                        """
+                        resp_diff = model.generate_content([prompt_diff], request_options={'timeout': 600})
+                        st.success("✅ Analisi comparativa completata!")
+                        st.subheader("Controllo Differenze e Raccomandazioni")
+                        st.markdown(resp_diff.text.strip())
+
+                    except Exception as e:
+                        st.error(f"Errore durante l'analisi comparativa: {e}")
+
+                    finally:
+                        # Pulisci i file su Gemini (se sono stati caricati)
+                        try:
+                            if 'video_1' in locals():
+                                genai.delete_file(video_1.name)
+                            if 'video_2' in locals():
+                                genai.delete_file(video_2.name)
+                        except Exception:
+                            pass
+            
+                
 def tool_disabilitato():
-    """Funzione per la sezione disabilitata."""
+    """
+    Funzione per la sezione disabilitata.
+    """
     st.header("📊 Report Hub")
     st.warning("Questa funzionalità non è ancora attiva.")
     st.info("Qui potrai visualizzare e gestire i report delle analisi precedenti.")
+
 
 if __name__ == "__main__":
     main()
